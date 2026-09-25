@@ -1,0 +1,598 @@
+name: RDP Diagnostic
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnostic-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+
+    steps:
+
+      # ============================================================
+      # 1. CONFIGURAÇÃO DO RDP
+      # ============================================================
+      - name: Configure RDP
+        shell: powershell
+        run: |
+          Write-Host "=== CONFIGURANDO RDP ==="
+
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" `
+            -Value 0 `
+            -Force
+
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" `
+            -Value 0 `
+            -Force
+
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "SecurityLayer" `
+            -Value 0 `
+            -Force
+
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+
+          netsh advfirewall firewall add rule `
+            name="RDP-Tailscale" `
+            dir=in `
+            action=allow `
+            protocol=TCP `
+            localport=3389
+
+          Restart-Service -Name TermService -Force
+
+          Write-Host "RDP configurado."
+
+      # ============================================================
+      # 2. CRIAR USUÁRIO RDP
+      # ============================================================
+      - name: Create RDP User
+        shell: powershell
+        run: |
+          Write-Host "=== CRIANDO USUÁRIO RDP ==="
+
+          Add-Type -AssemblyName System.Security
+
+          $charSet = @{
+              Upper   = [char[]](65..90)
+              Lower   = [char[]](97..122)
+              Number  = [char[]](48..57)
+              Special = (
+                  [char[]](33..47) +
+                  [char[]](58..64) +
+                  [char[]](91..96) +
+                  [char[]](123..126)
+              )
+          }
+
+          $rawPassword = @()
+
+          $rawPassword += $charSet.Upper | Get-Random -Count 4
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
+
+          $password = -join ($rawPassword | Sort-Object { Get-Random })
+
+          $securePass = ConvertTo-SecureString `
+            $password `
+            -AsPlainText `
+            -Force
+
+          if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
+              Remove-LocalUser -Name "RDP"
+          }
+
+          New-LocalUser `
+            -Name "RDP" `
+            -Password $securePass `
+            -AccountNeverExpires
+
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member "RDP"
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member "RDP"
+
+          "RDP_USER=RDP" >> $env:GITHUB_ENV
+          "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+
+          Write-Host "Usuário RDP criado."
+
+      # ============================================================
+      # 3. INSTALAR TAILSCALE
+      # ============================================================
+      - name: Install Tailscale
+        shell: powershell
+        run: |
+          Write-Host "=== INSTALANDO TAILSCALE ==="
+
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+
+          $installerPath = "$env:TEMP\tailscale.msi"
+
+          Invoke-WebRequest `
+            -Uri $tsUrl `
+            -OutFile $installerPath
+
+          Start-Process `
+            msiexec.exe `
+            -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" `
+            -Wait
+
+          Remove-Item $installerPath -Force
+
+          Write-Host "Tailscale instalado."
+
+      # ============================================================
+      # 4. CONECTAR TAILSCALE
+      # ============================================================
+      - name: Establish Tailscale Connection
+        shell: powershell
+        run: |
+          Write-Host "=== CONECTANDO TAILSCALE ==="
+
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
+            --hostname=gh-diagnostic-$env:GITHUB_RUN_ID
+
+          $tsIP = $null
+          $retries = 0
+
+          while (-not $tsIP -and $retries -lt 20) {
+
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+
+              if ($tsIP) {
+                  break
+              }
+
+              Start-Sleep -Seconds 3
+
+              $retries++
+          }
+
+          if (-not $tsIP) {
+              Write-Error "Tailscale não recebeu um IP."
+              exit 1
+          }
+
+          "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+          Write-Host ""
+          Write-Host "Tailscale IP: $tsIP"
+
+      # ============================================================
+      # 5. DIAGNÓSTICO DO WINDOWS
+      # ============================================================
+      - name: Diagnose Windows
+        shell: powershell
+        run: |
+          $report = "$env:GITHUB_WORKSPACE\diagnostic-report.txt"
+
+          "============================================================" | Out-File $report
+          " WINDOWS DIAGNOSTIC REPORT" | Out-File $report -Append
+          "============================================================" | Out-File $report -Append
+          "" | Out-File $report -Append
+
+          Write-Host "=== WINDOWS ==="
+
+          Get-ComputerInfo |
+            Select-Object `
+              WindowsProductName,
+              WindowsVersion,
+              OsBuildNumber,
+              OsArchitecture |
+            Format-List |
+            Tee-Object -FilePath $report -Append
+
+          Write-Host "=== COMPUTER ==="
+
+          Get-CimInstance Win32_ComputerSystem |
+            Select-Object `
+              Manufacturer,
+              Model,
+              SystemType,
+              TotalPhysicalMemory |
+            Format-List |
+            Tee-Object -FilePath $report -Append
+
+          Write-Host "=== CPU ==="
+
+          Get-CimInstance Win32_Processor |
+            Select-Object `
+              Name,
+              NumberOfCores,
+              NumberOfLogicalProcessors,
+              MaxClockSpeed |
+            Format-List |
+            Tee-Object -FilePath $report -Append
+
+          Write-Host "=== RAM ==="
+
+          Get-CimInstance Win32_OperatingSystem |
+            Select-Object `
+              TotalVisibleMemorySize,
+              FreePhysicalMemory |
+            Format-List |
+            Tee-Object -FilePath $report -Append
+
+      # ============================================================
+      # 6. DIAGNÓSTICO DA GPU
+      # ============================================================
+      - name: Diagnose GPU
+        shell: powershell
+        run: |
+          $report = "$env:GITHUB_WORKSPACE\diagnostic-report.txt"
+
+          Write-Host ""
+          Write-Host "============================================================"
+          Write-Host " GPU / VIDEO"
+          Write-Host "============================================================"
+
+          "============================================================" |
+            Out-File $report -Append
+
+          "GPU / VIDEO" |
+            Out-File $report -Append
+
+          "============================================================" |
+            Out-File $report -Append
+
+          Get-CimInstance Win32_VideoController |
+            Select-Object `
+              Name,
+              AdapterCompatibility,
+              DriverVersion,
+              DriverDate,
+              VideoModeDescription,
+              CurrentHorizontalResolution,
+              CurrentVerticalResolution,
+              CurrentRefreshRate,
+              AdapterRAM |
+            Format-List |
+            Tee-Object -FilePath $report -Append
+
+          Write-Host ""
+          Write-Host "=== DISPLAY PNP ==="
+
+          Get-PnpDevice |
+            Where-Object {
+              $_.Class -match "Display"
+            } |
+            Select-Object `
+              Status,
+              Class,
+              FriendlyName,
+              InstanceId |
+            Format-List |
+            Tee-Object -FilePath $report -Append
+
+      # ============================================================
+      # 7. MONITOR
+      # ============================================================
+      - name: Diagnose Monitor
+        shell: powershell
+        run: |
+          $report = "$env:GITHUB_WORKSPACE\diagnostic-report.txt"
+
+          Write-Host ""
+          Write-Host "=== MONITOR ==="
+
+          Get-CimInstance Win32_DesktopMonitor |
+            Select-Object `
+              Name,
+              MonitorType,
+              ScreenWidth,
+              ScreenHeight,
+              Status |
+            Format-List |
+            Tee-Object -FilePath $report -Append
+
+      # ============================================================
+      # 8. DIRECTX
+      # ============================================================
+      - name: Diagnose DirectX
+        shell: powershell
+        run: |
+          $report = "$env:GITHUB_WORKSPACE\diagnostic-report.txt"
+
+          Write-Host ""
+          Write-Host "=== DIRECTX ==="
+
+          $dxdiag = "$env:TEMP\dxdiag.txt"
+
+          Start-Process `
+            -FilePath "dxdiag.exe" `
+            -ArgumentList "/t `"$dxdiag`"" `
+            -Wait
+
+          if (Test-Path $dxdiag) {
+
+              Get-Content $dxdiag |
+                Tee-Object -FilePath $report -Append
+          }
+
+      # ============================================================
+      # 9. SESSÃO RDP
+      # ============================================================
+      - name: Diagnose RDP Session
+        shell: powershell
+        run: |
+          $report = "$env:GITHUB_WORKSPACE\diagnostic-report.txt"
+
+          Write-Host ""
+          Write-Host "=== RDP SESSION ==="
+
+          "RDP SESSION" |
+            Out-File $report -Append
+
+          qwinsta |
+            Tee-Object -FilePath $report -Append
+
+          Write-Host ""
+          Write-Host "=== RDP CONFIGURATION ==="
+
+          Get-ItemProperty `
+            'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' |
+            Select-Object `
+              UserAuthentication,
+              SecurityLayer,
+              MinEncryptionLevel |
+            Format-List |
+            Tee-Object -FilePath $report -Append
+
+      # ============================================================
+      # 10. SERVIÇOS GRÁFICOS
+      # ============================================================
+      - name: Diagnose Graphic Services
+        shell: powershell
+        run: |
+          $report = "$env:GITHUB_WORKSPACE\diagnostic-report.txt"
+
+          Write-Host ""
+          Write-Host "=== GRAPHICS SERVICES ==="
+
+          Get-Service |
+            Where-Object {
+              $_.Name -match `
+              "TermService|UmRdpService|Graphics|Display|Dwm"
+            } |
+            Select-Object `
+              Name,
+              DisplayName,
+              Status,
+              StartType |
+            Format-Table -AutoSize |
+            Tee-Object -FilePath $report -Append
+
+      # ============================================================
+      # 11. REDE
+      # ============================================================
+      - name: Diagnose Network
+        shell: powershell
+        run: |
+          $report = "$env:GITHUB_WORKSPACE\diagnostic-report.txt"
+
+          Write-Host ""
+          Write-Host "=== NETWORK ==="
+
+          Get-NetAdapter |
+            Select-Object `
+              Name,
+              InterfaceDescription,
+              Status,
+              LinkSpeed |
+            Format-Table -AutoSize |
+            Tee-Object -FilePath $report -Append
+
+          Write-Host ""
+          Write-Host "=== TAILSCALE ==="
+
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" status |
+            Tee-Object -FilePath $report -Append
+
+          Write-Host ""
+          Write-Host "=== TAILSCALE IP ==="
+
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4 |
+            Tee-Object -FilePath $report -Append
+
+      # ============================================================
+      # 12. PROCESSOS
+      # ============================================================
+      - name: Diagnose Processes
+        shell: powershell
+        run: |
+          $report = "$env:GITHUB_WORKSPACE\diagnostic-report.txt"
+
+          Write-Host ""
+          Write-Host "=== PROCESSES ==="
+
+          Get-Process |
+            Sort-Object CPU -Descending |
+            Select-Object -First 40 `
+              ProcessName,
+              Id,
+              CPU,
+              WorkingSet |
+            Format-Table -AutoSize |
+            Tee-Object -FilePath $report -Append
+
+      # ============================================================
+      # 13. EVENTOS DE ERRO
+      # ============================================================
+      - name: Collect Event Logs
+        shell: powershell
+        run: |
+          $report = "$env:GITHUB_WORKSPACE\diagnostic-report.txt"
+
+          Write-Host ""
+          Write-Host "=== RECENT EVENT LOGS ==="
+
+          "============================================================" |
+            Out-File $report -Append
+
+          "RECENT EVENT LOGS" |
+            Out-File $report -Append
+
+          "============================================================" |
+            Out-File $report -Append
+
+          $logs = @(
+              "Application",
+              "System"
+          )
+
+          foreach ($log in $logs) {
+
+              Write-Host ""
+              Write-Host "LOG: $log"
+
+              Get-WinEvent `
+                -LogName $log `
+                -MaxEvents 100 |
+                Where-Object {
+                    $_.LevelDisplayName -in @(
+                        "Error",
+                        "Critical",
+                        "Warning"
+                    )
+                } |
+                Select-Object `
+                    TimeCreated,
+                    ProviderName,
+                    Id,
+                    LevelDisplayName,
+                    Message |
+                Format-List |
+                Tee-Object -FilePath $report -Append
+          }
+
+      # ============================================================
+      # 14. PROCESSOS DO TIKTOK LIVE STUDIO
+      # ============================================================
+      - name: Check TikTok LIVE Studio
+        shell: powershell
+        run: |
+          $report = "$env:GITHUB_WORKSPACE\diagnostic-report.txt"
+
+          Write-Host ""
+          Write-Host "=== TIKTOK LIVE STUDIO ==="
+
+          $possibleProcesses = @(
+              "TikTok",
+              "TikTokLiveStudio",
+              "LIVEStudio"
+          )
+
+          foreach ($processName in $possibleProcesses) {
+
+              $processes = Get-Process `
+                -Name $processName `
+                -ErrorAction SilentlyContinue
+
+              if ($processes) {
+
+                  $processes |
+                    Select-Object `
+                      ProcessName,
+                      Id,
+                      Path,
+                      CPU,
+                      WorkingSet |
+                    Format-List |
+                    Tee-Object -FilePath $report -Append
+              }
+          }
+
+      # ============================================================
+      # 15. TESTE DE RDP
+      # ============================================================
+      - name: Verify RDP
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "=== RDP CONNECTIVITY ==="
+
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+
+          $result = Test-NetConnection `
+            -ComputerName $env:TAILSCALE_IP `
+            -Port 3389
+
+          $result |
+            Format-List
+
+          if (-not $result.TcpTestSucceeded) {
+              Write-Error "RDP não está acessível."
+              exit 1
+          }
+
+          Write-Host "RDP TCP OK."
+
+      # ============================================================
+      # 16. MOSTRAR CREDENCIAIS
+      # ============================================================
+      - name: Show RDP Information
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "============================================================"
+          Write-Host " RDP ACCESS"
+          Write-Host "============================================================"
+
+          Write-Host "Address:  $env:TAILSCALE_IP"
+          Write-Host "Username: $env:RDP_USER"
+          Write-Host "Password: $env:RDP_PASSWORD"
+
+          Write-Host "============================================================"
+
+      # ============================================================
+      # 17. UPLOAD DO DIAGNÓSTICO
+      # ============================================================
+      - name: Upload Diagnostic Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-report
+          path: diagnostic-report.txt
+          retention-days: 7
+
+      # ============================================================
+      # 18. MANTER RUNNER ATIVO
+      # ============================================================
+      - name: Maintain Connection
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "============================================================"
+          Write-Host " RDP ACTIVE"
+          Write-Host "============================================================"
+
+          Write-Host "Address:  $env:TAILSCALE_IP"
+          Write-Host "Username: $env:RDP_USER"
+          Write-Host "Password: $env:RDP_PASSWORD"
+
+          Write-Host "============================================================"
+          Write-Host ""
+          Write-Host "Abra o TikTok LIVE Studio e reproduza o problema."
+          Write-Host ""
+          Write-Host "IMPORTANTE:"
+          Write-Host "Depois que o LIVE Studio desconectar,"
+          Write-Host "volte ao GitHub Actions e deixe o workflow continuar."
+          Write-Host ""
+
+          while ($true) {
+
+              Write-Host "[$(Get-Date)] Diagnostic RDP Active"
+
+              Start-Sleep -Seconds 300
+          }
