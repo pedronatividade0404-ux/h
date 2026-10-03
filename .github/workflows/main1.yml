@@ -10,567 +10,311 @@ jobs:
     timeout-minutes: 360
 
     steps:
-
-      # ============================================================
-      # DOWNLOAD
-      # ============================================================
-
-      - name: Download RustDesk
+      - name: Prepare Environment
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
           Write-Host "========================================"
-          Write-Host " BAIXANDO RUSTDESK"
+          Write-Host " PREPARANDO WINDOWS"
           Write-Host "========================================"
 
-          $dir = "C:\RustDesk"
-          $installer = "$dir\rustdesk.exe"
+          python -m pip install --upgrade pip
+          pip install pyautogui pyperclip psutil --quiet
 
           New-Item `
             -ItemType Directory `
-            -Path $dir `
+            -Path "C:\RustDesk" `
             -Force | Out-Null
 
-          Write-Host "Buscando ultima versao..."
 
-          $release = Invoke-RestMethod `
-            -Uri "https://api.github.com/repos/rustdesk/rustdesk/releases/latest" `
-            -Headers @{
-              "User-Agent" = "GitHub-Actions"
-              "Accept" = "application/vnd.github+json"
-            }
+      - name: Download RustDesk 1.2.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
 
-          $asset = $release.assets |
-            Where-Object {
-              $_.name -match 'x86_64\.exe$' -and
-              $_.name -notmatch 'portable'
-            } |
-            Select-Object -First 1
+          Write-Host "========================================"
+          Write-Host " BAIXANDO RUSTDESK 1.2.1"
+          Write-Host "========================================"
 
-          if (!$asset) {
-            throw "Nao foi encontrado RustDesk x86_64."
-          }
+          $url = "https://github.com/rustdesk/rustdesk/releases/download/1.2.1/rustdesk-1.2.1-x86_64.exe"
 
-          Write-Host ""
-          Write-Host "Versao encontrada: $($release.tag_name)"
-          Write-Host "Arquivo: $($asset.name)"
-          Write-Host ""
-          Write-Host "Baixando..."
+          $output = "C:\RustDesk\rustdesk.exe"
 
           & curl.exe `
             -L `
             --fail `
             --retry 5 `
             --retry-delay 3 `
-            --retry-all-errors `
             --connect-timeout 30 `
-            -o $installer `
-            $asset.browser_download_url
+            -o $output `
+            $url
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Falha no download. CURL=$LASTEXITCODE"
+              throw "Falha ao baixar RustDesk."
           }
 
-          if (!(Test-Path $installer)) {
-            throw "Arquivo nao foi baixado."
+          if (!(Test-Path $output)) {
+              throw "rustdesk.exe nao encontrado."
           }
 
-          $size = (Get-Item $installer).Length
-
-          if ($size -lt 1MB) {
-            throw "Arquivo baixado parece invalido."
-          }
+          $size = (Get-Item $output).Length
 
           Write-Host ""
           Write-Host "Download concluido."
-          Write-Host "Tamanho: $([math]::Round($size / 1MB, 2)) MB"
+          Write-Host "Tamanho: $([math]::Round($size / 1MB,2)) MB"
 
 
-      # ============================================================
-      # INSTALACAO
-      # ============================================================
-
-      - name: Install RustDesk
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Continue"
-
-          $installer = "C:\RustDesk\rustdesk.exe"
-
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host " INSTALANDO RUSTDESK"
-          Write-Host "========================================"
-
-          if (!(Test-Path $installer)) {
-            throw "Instalador nao encontrado."
-          }
-
-          Write-Host "Executando instalacao silenciosa..."
-
-          # NAO usamos -Wait aqui.
-          Start-Process `
-            -FilePath $installer `
-            -ArgumentList "--silent-install"
-
-          Write-Host "Comando de instalacao enviado."
-
-          # Aguarda aparecer em Program Files
-          $installed = "C:\Program Files\RustDesk\rustdesk.exe"
-
-          Write-Host ""
-          Write-Host "Aguardando instalacao..."
-
-          for ($i = 1; $i -le 30; $i++) {
-
-            Write-Host "Verificacao $i/30..."
-
-            if (Test-Path $installed) {
-              Write-Host "RustDesk encontrado!"
-              break
-            }
-
-            Start-Sleep -Seconds 2
-          }
-
-          if (!(Test-Path $installed)) {
-
-            Write-Host ""
-            Write-Host "Instalacao tradicional nao apareceu."
-            Write-Host "Tentando instalar servico manualmente..."
-
-            & $installer --install-service 2>$null
-
-            Start-Sleep -Seconds 10
-          }
-
-          Write-Host ""
-          Write-Host "Arquivos:"
-          Write-Host ""
-
-          if (Test-Path $installed) {
-            Write-Host "INSTALADO:"
-            Write-Host $installed
-          }
-          else {
-            Write-Host "Usando executavel:"
-            Write-Host $installer
-          }
-
-
-      # ============================================================
-      # DESCOBRIR EXECUTAVEL
-      # ============================================================
-
-      - name: Detect RustDesk
-        shell: powershell
-        run: |
-          $installed = "C:\Program Files\RustDesk\rustdesk.exe"
-          $downloaded = "C:\RustDesk\rustdesk.exe"
-
-          if (Test-Path $installed) {
-
-            $rustdesk = $installed
-
-          }
-          elseif (Test-Path $downloaded) {
-
-            $rustdesk = $downloaded
-
-          }
-          else {
-
-            throw "Nenhum executavel RustDesk encontrado."
-
-          }
-
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host " RUSTDESK ENCONTRADO"
-          Write-Host "========================================"
-          Write-Host ""
-          Write-Host $rustdesk
-
-          "RUSTDESK_EXE=$rustdesk" >> $env:GITHUB_ENV
-
-
-      # ============================================================
-      # SERVICO
-      # ============================================================
-
-      - name: Start RustDesk Service
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Continue"
-
-          $rustdesk = $env:RUSTDESK_EXE
-
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host " INICIANDO SERVICO"
-          Write-Host "========================================"
-
-          Write-Host ""
-          Write-Host "Servicos existentes:"
-          Get-Service |
-            Where-Object {
-              $_.Name -like "*rustdesk*" -or
-              $_.DisplayName -like "*rustdesk*"
-            } |
-            Format-Table -AutoSize
-
-          $service = Get-Service |
-            Where-Object {
-              $_.Name -like "*rustdesk*" -or
-              $_.DisplayName -like "*rustdesk*"
-            } |
-            Select-Object -First 1
-
-          if (!$service) {
-
-            Write-Host ""
-            Write-Host "Servico nao encontrado."
-            Write-Host "Tentando instalar..."
-
-            & $rustdesk --install-service 2>$null
-
-            Start-Sleep -Seconds 10
-
-            $service = Get-Service |
-              Where-Object {
-                $_.Name -like "*rustdesk*" -or
-                $_.DisplayName -like "*rustdesk*"
-              } |
-              Select-Object -First 1
-          }
-
-          if ($service) {
-
-            Write-Host ""
-            Write-Host "Servico encontrado:"
-            Write-Host $service.Name
-
-            try {
-              Set-Service `
-                -Name $service.Name `
-                -StartupType Automatic
-            }
-            catch {}
-
-            try {
-              Start-Service `
-                -Name $service.Name `
-                -ErrorAction SilentlyContinue
-            }
-            catch {}
-
-            Start-Sleep -Seconds 5
-
-            Get-Service `
-              -Name $service.Name |
-              Format-Table -AutoSize
-
-          }
-          else {
-
-            Write-Host ""
-            Write-Host "AVISO:"
-            Write-Host "Servico RustDesk ainda nao apareceu."
-
-          }
-
-
-      # ============================================================
-      # INICIAR RUSTDESK
-      # ============================================================
-
-      - name: Start RustDesk
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Continue"
-
-          $rustdesk = $env:RUSTDESK_EXE
-
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host " INICIANDO RUSTDESK"
-          Write-Host "========================================"
-
-          # Fecha somente processos GUI antigos.
-          Get-Process rustdesk -ErrorAction SilentlyContinue |
-            Where-Object {
-              $_.SessionId -ne 0
-            } |
-            Stop-Process -Force -ErrorAction SilentlyContinue
-
-          Start-Sleep -Seconds 2
-
-          Start-Process `
-            -FilePath $rustdesk
-
-          Write-Host "RustDesk iniciado."
-
-          Start-Sleep -Seconds 15
-
-          Write-Host ""
-          Write-Host "Processos:"
-          Write-Host ""
-
-          Get-Process rustdesk `
-            -ErrorAction SilentlyContinue |
-            Select-Object `
-              Id,
-              ProcessName,
-              SessionId,
-              StartTime |
-            Format-Table -AutoSize
-
-
-      # ============================================================
-      # CONFIGURAR SENHA
-      # ============================================================
-
-      - name: Configure Password
+      - name: Create RustDesk Setup Script
         shell: powershell
         env:
           RUSTDESK_PASSWORD: ${{ secrets.RUSTDESK_PASSWORD }}
         run: |
-          $ErrorActionPreference = "Continue"
+          @'
+          import os
+          import time
+          import pyautogui as pag
+          import pyperclip
 
-          $rustdesk = $env:RUSTDESK_EXE
+          password = os.environ.get(
+              "RUSTDESK_PASSWORD",
+              "Disalardp1"
+          )
 
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host " CONFIGURANDO SENHA"
-          Write-Host "========================================"
+          print("Aguardando RustDesk...")
+          time.sleep(5)
 
-          if ([string]::IsNullOrWhiteSpace($env:RUSTDESK_PASSWORD)) {
+          actions = [
+              (109, 451, 2),  # Install
+              (589, 495, 2),  # Install novamente
+              (722, 429, 1),  # OK
 
-            Write-Host ""
-            Write-Host "RUSTDESK_PASSWORD nao configurado."
-            Write-Host ""
-            Write-Host "Crie em:"
-            Write-Host "Settings -> Secrets and variables -> Actions"
-            Write-Host ""
+              (708, 22, 7),   # Menu
+              (83, 170, 2),   # Security
+              (465, 68, 2),   # Enable
 
-            exit 0
-          }
+              (798, 386, 2),  # Scroll
+              (415, 224, 2),  # Set password
 
-          Write-Host "Configurando senha..."
+              (291, 250, 2),  # Password
+              (310, 338, 2),  # Confirmacao
 
-          try {
+              (631, 427, 2),  # OK
 
-            & $rustdesk `
-              --password $env:RUSTDESK_PASSWORD |
-              Out-String |
-              Write-Host
+              (95, 22, 2),    # Voltar para tela principal
+          ]
 
-          }
-          catch {
+          for x, y, duration in actions:
 
-            Write-Host "Erro ao configurar senha:"
-            Write-Host $_
+              print("Click:", x, y)
 
-          }
+              pag.click(
+                  x,
+                  y,
+                  duration=duration
+              )
 
-          Start-Sleep -Seconds 5
+              time.sleep(0.5)
 
-          Write-Host "Etapa de senha concluida."
+              if (x, y) in [
+                  (291, 250),
+                  (310, 338)
+              ]:
+
+                  pag.hotkey("ctrl", "a")
+
+                  pag.write(
+                      password,
+                      interval=0.03
+                  )
+
+          print("Configuracao concluida.")
+
+          time.sleep(5)
+
+          # Copia o ID da interface.
+          pag.rightClick(
+              165,
+              168,
+              duration=1
+          )
+
+          time.sleep(1)
+
+          pag.click(
+              199,
+              178,
+              duration=1
+          )
+
+          time.sleep(1)
+
+          pag.rightClick(
+              138,
+              167,
+              duration=1
+          )
+
+          time.sleep(1)
+
+          pag.click(
+              163,
+              182,
+              duration=1
+          )
+
+          time.sleep(2)
+
+          rustdesk_id = pyperclip.paste().strip()
+
+          print(
+              "Clipboard:",
+              rustdesk_id
+          )
+
+          with open(
+              r"C:\RustDesk\id.txt",
+              "w"
+          ) as f:
+
+              f.write(rustdesk_id)
+
+          print("FINALIZADO")
+          '@ | Set-Content `
+                "C:\RustDesk\setup.py" `
+                -Encoding UTF8
 
 
-      # ============================================================
-      # PEGAR ID
-      # ============================================================
-
-      - name: Get RustDesk ID
+      - name: Start RustDesk
         shell: powershell
         run: |
-          $ErrorActionPreference = "Continue"
+          Write-Host "========================================"
+          Write-Host " INICIANDO RUSTDESK"
+          Write-Host "========================================"
 
-          $rustdesk = $env:RUSTDESK_EXE
+          Start-Process `
+            -FilePath "C:\RustDesk\rustdesk.exe"
 
+          Write-Host "RustDesk iniciado."
+
+          Start-Sleep -Seconds 10
+
+          Get-Process rustdesk `
+            -ErrorAction SilentlyContinue |
+            Format-Table `
+              Id,
+              ProcessName,
+              SessionId `
+              -AutoSize
+
+
+      - name: Configure RustDesk GUI
+        shell: powershell
+        env:
+          RUSTDESK_PASSWORD: ${{ secrets.RUSTDESK_PASSWORD }}
+        run: |
+          Write-Host "========================================"
+          Write-Host " CONFIGURANDO RUSTDESK"
+          Write-Host "========================================"
+
+          python C:\RustDesk\setup.py
+
+
+      - name: Read RustDesk ID
+        shell: powershell
+        run: |
           Write-Host ""
           Write-Host "========================================"
-          Write-Host " OBTENDO ID"
+          Write-Host " VERIFICANDO ID"
           Write-Host "========================================"
+
+          if (!(Test-Path "C:\RustDesk\id.txt")) {
+              throw "Arquivo com ID nao foi criado."
+          }
+
+          $id = (
+              Get-Content `
+                "C:\RustDesk\id.txt" `
+                -Raw
+          ).Trim()
+
+          Write-Host ""
+          Write-Host "Valor copiado:"
+          Write-Host "[$id]"
           Write-Host ""
 
-          if (!(Test-Path $rustdesk)) {
-            throw "RustDesk nao encontrado."
-          }
+          if ($id -match '([0-9]{6,})') {
 
-          $id = ""
+              $id = $Matches[1]
 
-          for ($i = 1; $i -le 30; $i++) {
+          } else {
 
-            Write-Host "Tentativa $i/30..."
-
-            try {
-
-              # Importante no PowerShell:
-              # captura explicitamente a saida.
-              $output = (
-                & $rustdesk --get-id 2>$null |
-                Out-String
-              ).Trim()
-
-              if ($output) {
-
-                Write-Host "Resposta RustDesk: [$output]"
-
-                if ($output -match '[0-9]{6,}') {
-
-                  $id = $Matches[0]
-
-                  Write-Host ""
-                  Write-Host "ID encontrado!"
-
-                  break
-                }
-              }
-
-            }
-            catch {
-
-              Write-Host "Erro:"
-              Write-Host $_
-
-            }
-
-            Start-Sleep -Seconds 3
-          }
-
-          if ([string]::IsNullOrWhiteSpace($id)) {
-
-            Write-Host ""
-            Write-Host "========================================"
-            Write-Host " DIAGNOSTICO"
-            Write-Host "========================================"
-
-            Write-Host ""
-            Write-Host "Processos:"
-            Write-Host ""
-
-            Get-Process rustdesk `
-              -ErrorAction SilentlyContinue |
-              Select-Object `
-                Id,
-                ProcessName,
-                SessionId |
-              Format-Table -AutoSize
-
-            Write-Host ""
-            Write-Host "Servicos:"
-            Write-Host ""
-
-            Get-Service |
-              Where-Object {
-                $_.Name -like "*rustdesk*" -or
-                $_.DisplayName -like "*rustdesk*"
-              } |
-              Format-Table -AutoSize
-
-            Write-Host ""
-            Write-Host "Tentando ultima leitura..."
-
-            try {
-
-              cmd /c "`"$rustdesk`" --get-id"
-
-            }
-            catch {}
-
-            throw "RustDesk nao retornou um ID."
+              throw "O valor copiado nao parece ser um ID RustDesk."
           }
 
           "RUSTDESK_ID=$id" >> $env:GITHUB_ENV
 
-          Write-Host ""
           Write-Host "========================================"
-          Write-Host "          RUSTDESK PRONTO"
+          Write-Host "       RUSTDESK PRONTO"
           Write-Host "========================================"
           Write-Host ""
           Write-Host "ID:"
           Write-Host ""
-          Write-Host "        $id"
-          Write-Host ""
-          Write-Host "Senha:"
-          Write-Host "Use a definida em RUSTDESK_PASSWORD"
+          Write-Host "       $id"
           Write-Host ""
           Write-Host "========================================"
 
 
-      # ============================================================
-      # INFORMACOES
-      # ============================================================
-
-      - name: Mobile Connection
+      - name: Show Connection
         shell: powershell
         run: |
           Write-Host ""
           Write-Host "========================================"
-          Write-Host "      CONECTAR PELO CELULAR"
+          Write-Host "     CONECTAR PELO CELULAR"
           Write-Host "========================================"
           Write-Host ""
           Write-Host "RustDesk ID:"
           Write-Host ""
           Write-Host "       $env:RUSTDESK_ID"
           Write-Host ""
-          Write-Host "No Android/iPhone:"
+          Write-Host "Senha:"
+          Write-Host "Use RUSTDESK_PASSWORD"
           Write-Host ""
-          Write-Host "1 - Abra RustDesk"
-          Write-Host "2 - Digite o ID acima"
-          Write-Host "3 - Clique em conectar"
-          Write-Host "4 - Digite sua senha"
+          Write-Host "Abra RustDesk no Android/iPhone"
+          Write-Host "e coloque o ID acima."
           Write-Host ""
           Write-Host "========================================"
 
-
-      # ============================================================
-      # MANTER RUNNER ATIVO
-      # ============================================================
 
       - name: Keep Alive
         shell: powershell
         run: |
-          $rustdesk = $env:RUSTDESK_EXE
-
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host " WINDOWS ONLINE"
-          Write-Host "========================================"
-          Write-Host ""
-          Write-Host "RustDesk ID:"
-          Write-Host "$env:RUSTDESK_ID"
-          Write-Host ""
-
           $start = Get-Date
 
           while ($true) {
 
-            $process = Get-Process rustdesk `
-              -ErrorAction SilentlyContinue
+              $rustdesk = Get-Process rustdesk `
+                  -ErrorAction SilentlyContinue
 
-            if (!$process) {
+              if (!$rustdesk) {
 
-              Write-Host ""
-              Write-Host "RustDesk parou."
-              Write-Host "Reiniciando..."
+                  Write-Host "RustDesk parou. Reiniciando..."
 
-              Start-Process `
-                -FilePath $rustdesk
+                  Start-Process `
+                    "C:\Program Files\RustDesk\rustdesk.exe" `
+                    -ErrorAction SilentlyContinue
 
-              Start-Sleep -Seconds 10
-            }
+                  Start-Sleep -Seconds 10
 
-            $elapsed = (Get-Date) - $start
+              }
 
-            Write-Host (
-              "RustDesk ONLINE | ID: {0} | Tempo: {1:hh\:mm\:ss}" -f `
-              $env:RUSTDESK_ID,
-              $elapsed
-            )
+              $elapsed = (Get-Date) - $start
 
-            Start-Sleep -Seconds 60
+              Write-Host (
+                  "ONLINE | RustDesk: {0} | Tempo: {1:hh\:mm\:ss}" -f `
+                  $env:RUSTDESK_ID,
+                  $elapsed
+              )
+
+              Start-Sleep -Seconds 60
           }
