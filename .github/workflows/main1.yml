@@ -19,16 +19,59 @@ jobs:
           Write-Host " Instalando RustDesk..."
           Write-Host "========================================"
 
-          $url = "https://github.com/rustdesk/rustdesk/releases/latest/download/rustdesk-1.4.4-x86_64.exe"
           $installer = "$env:TEMP\rustdesk.exe"
 
-          Invoke-WebRequest `
-            -Uri $url `
-            -OutFile $installer
+          # Descobre a URL atual da versão x86_64
+          $release = Invoke-RestMethod `
+            -Uri "https://api.github.com/repos/rustdesk/rustdesk/releases/latest" `
+            -Headers @{
+              "User-Agent" = "GitHub-Actions"
+              "Accept" = "application/vnd.github+json"
+            }
+
+          $asset = $release.assets | Where-Object {
+              $_.name -match 'x86_64\.exe$' -and
+              $_.name -notmatch 'portable'
+          } | Select-Object -First 1
+
+          if (!$asset) {
+              throw "Nao foi possivel localizar o instalador x86_64 do RustDesk."
+          }
+
+          Write-Host "Versao encontrada: $($release.tag_name)"
+          Write-Host "Arquivo: $($asset.name)"
+          Write-Host "Baixando..."
+
+          # curl costuma ser mais confiavel no runner do que Invoke-WebRequest
+          & curl.exe `
+            -L `
+            --fail `
+            --retry 5 `
+            --retry-delay 5 `
+            --retry-all-errors `
+            --connect-timeout 30 `
+            -o $installer `
+            $asset.browser_download_url
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Falha ao baixar RustDesk. curl exit code: $LASTEXITCODE"
+          }
+
+          if (!(Test-Path $installer)) {
+              throw "O instalador nao foi criado."
+          }
+
+          $size = (Get-Item $installer).Length
 
           Write-Host "Download concluido."
+          Write-Host "Tamanho: $([math]::Round($size / 1MB, 2)) MB"
 
-          # Instala o RustDesk
+          if ($size -lt 1MB) {
+              throw "Arquivo baixado parece invalido."
+          }
+
+          Write-Host "Instalando..."
+
           Start-Process `
             -FilePath $installer `
             -ArgumentList "--silent-install" `
@@ -39,11 +82,13 @@ jobs:
           $rustdesk = "C:\Program Files\RustDesk\rustdesk.exe"
 
           if (!(Test-Path $rustdesk)) {
-              throw "RustDesk nao foi encontrado."
+              throw "RustDesk nao foi encontrado em $rustdesk"
           }
 
-          Write-Host "RustDesk instalado em:"
-          Write-Host $rustdesk
+          Write-Host "========================================"
+          Write-Host " RustDesk instalado!"
+          Write-Host " $rustdesk"
+          Write-Host "========================================"
 
       - name: Configure RustDesk
         shell: powershell
