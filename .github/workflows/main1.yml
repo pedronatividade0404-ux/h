@@ -1,693 +1,113 @@
-name: Windows - RustDesk Mobile
+name: RDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  rustdesk:
-    name: Windows RustDesk
+  secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 3600
 
     steps:
-
-      # ============================================================
-      # 1. PREPARAR AMBIENTE
-      # ============================================================
-
-      - name: Prepare Environment
-        shell: powershell
+      - name: Configure Core RDP Settings
         run: |
-          $ErrorActionPreference = "Stop"
+          # Enable Remote Desktop and disable Network Level Authentication (if needed)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
 
-          Write-Host "========================================"
-          Write-Host " PREPARANDO WINDOWS"
-          Write-Host "========================================"
+          # Remove any existing rule with the same name to avoid duplication
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          
+          # For testing, allow any incoming connection on port 3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
 
-          python -m pip install `
-            pyautogui `
-            pyperclip `
-            psutil `
-            --quiet
+          # (Optional) Restart the Remote Desktop service to ensure changes take effect
+          Restart-Service -Name TermService -Force
 
-          New-Item `
-            -ItemType Directory `
-            -Path "C:\RustDesk" `
-            -Force |
-            Out-Null
-
-          Write-Host ""
-          Write-Host "Ambiente preparado."
-
-
-      # ============================================================
-      # 2. BAIXAR RUSTDESK
-      # ============================================================
-
-      - name: Download RustDesk
-        shell: powershell
+      - name: Create RDP User with Secure Password
         run: |
-          $ErrorActionPreference = "Stop"
-
-          Write-Host "========================================"
-          Write-Host " BAIXANDO RUSTDESK 1.2.1"
-          Write-Host "========================================"
-
-          $url = "https://github.com/rustdesk/rustdesk/releases/download/1.2.1/rustdesk-1.2.1-x86_64.exe"
-
-          $output = "C:\RustDesk\rustdesk.exe"
-
-          & curl.exe `
-            -L `
-            --fail `
-            --retry 5 `
-            --retry-delay 3 `
-            --retry-all-errors `
-            --connect-timeout 30 `
-            -o $output `
-            $url
-
-          if ($LASTEXITCODE -ne 0) {
-              throw "Falha ao baixar RustDesk."
+          Add-Type -AssemblyName System.Security
+          $charSet = @{
+              Upper   = [char[]](65..90)      # A-Z
+              Lower   = [char[]](97..122)     # a-z
+              Number  = [char[]](48..57)      # 0-9
+              Special = ([char[]](33..47) + [char[]](58..64) +
+                         [char[]](91..96) + [char[]](123..126)) # Special characters
+          }
+          $rawPassword = @()
+          $rawPassword += $charSet.Upper | Get-Random -Count 4
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
+          $password = -join ($rawPassword | Sort-Object { Get-Random })
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          
+          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
+          
+          if (-not (Get-LocalUser -Name "RDP")) {
+              Write-Error "User creation failed"
+              exit 1
           }
 
-          if (!(Test-Path $output)) {
-              throw "rustdesk.exe nao encontrado."
-          }
-
-          $size = (
-              Get-Item $output
-          ).Length
-
-          if ($size -lt 1MB) {
-              throw "Arquivo RustDesk parece invalido."
-          }
-
-          Write-Host ""
-          Write-Host "Download concluido."
-          Write-Host "Tamanho: $([math]::Round($size / 1MB,2)) MB"
-
-
-      # ============================================================
-      # 3. CRIAR SCRIPT DE CONFIGURACAO
-      # ============================================================
-
-      - name: Create Setup Script
-        shell: powershell
+      - name: Install Tailscale
         run: |
-          Write-Host "========================================"
-          Write-Host " CRIANDO CONFIGURADOR"
-          Write-Host "========================================"
-
-          @'
-          import os
-          import time
-          import pyautogui as pag
-          import pyperclip
-
-          pag.FAILSAFE = False
-          pag.PAUSE = 0.4
-
-          password = os.environ.get(
-              "RUSTDESK_PASSWORD",
-              "Disalardp1"
-          )
-
-          print("=" * 50)
-          print("CONFIGURANDO RUSTDESK")
-          print("=" * 50)
-
-          print("Aguardando interface...")
-          time.sleep(5)
-
-
-          # ---------------------------------------------------------
-          # INSTALAR
-          # ---------------------------------------------------------
-
-          print("Install...")
-          pag.click(
-              109,
-              451,
-              duration=2
-          )
-
-          time.sleep(2)
-
-          print("Confirmando Install...")
-          pag.click(
-              589,
-              495,
-              duration=2
-          )
-
-          time.sleep(2)
-
-          print("OK...")
-          pag.click(
-              722,
-              429,
-              duration=1
-          )
-
-          time.sleep(3)
-
-
-          # ---------------------------------------------------------
-          # ABRIR CONFIGURACOES
-          # ---------------------------------------------------------
-
-          print("Abrindo menu...")
-          pag.click(
-              708,
-              22,
-              duration=2
-          )
-
-          time.sleep(2)
-
-          print("Security...")
-          pag.click(
-              83,
-              170,
-              duration=2
-          )
-
-          time.sleep(2)
-
-
-          # ---------------------------------------------------------
-          # HABILITAR ACESSO
-          # ---------------------------------------------------------
-
-          print("Habilitando acesso...")
-          pag.click(
-              465,
-              68,
-              duration=2
-          )
-
-          time.sleep(2)
-
-          print("Scroll...")
-          pag.click(
-              798,
-              386,
-              duration=2
-          )
-
-          time.sleep(2)
-
-
-          # ---------------------------------------------------------
-          # CONFIGURAR SENHA
-          # ---------------------------------------------------------
-
-          print("Set password...")
-          pag.click(
-              415,
-              224,
-              duration=2
-          )
-
-          time.sleep(2)
-
-
-          # Senha
-          pag.click(
-              291,
-              250,
-              duration=1
-          )
-
-          pag.hotkey(
-              "ctrl",
-              "a"
-          )
-
-          pag.write(
-              password,
-              interval=0.03
-          )
-
-
-          # Confirmar senha
-          pag.click(
-              310,
-              338,
-              duration=1
-          )
-
-          pag.hotkey(
-              "ctrl",
-              "a"
-          )
-
-          pag.write(
-              password,
-              interval=0.03
-          )
-
-          time.sleep(1)
-
-
-          # Confirmar
-          pag.click(
-              631,
-              427,
-              duration=2
-          )
-
-          time.sleep(3)
-
-
-          # ---------------------------------------------------------
-          # VOLTAR PARA HOME
-          # ---------------------------------------------------------
-
-          print("Voltando para tela principal...")
-
-          pag.click(
-              95,
-              22,
-              duration=2
-          )
-
-          time.sleep(5)
-
-
-          # ---------------------------------------------------------
-          # COPIAR ID
-          # ---------------------------------------------------------
-
-          print("Copiando ID...")
-
-          # Mesmo metodo do script original.
-
-          pag.rightClick(
-              165,
-              168,
-              duration=1
-          )
-
-          time.sleep(1)
-
-          pag.click(
-              199,
-              178,
-              duration=1
-          )
-
-          time.sleep(1)
-
-          pag.rightClick(
-              138,
-              167,
-              duration=1
-          )
-
-          time.sleep(1)
-
-          pag.click(
-              163,
-              182,
-              duration=1
-          )
-
-          time.sleep(2)
-
-
-          # ---------------------------------------------------------
-          # LER CLIPBOARD
-          # ---------------------------------------------------------
-
-          rustdesk_id = pyperclip.paste().strip()
-
-          print("")
-          print("ID COPIADO:")
-          print(rustdesk_id)
-          print("")
-
-
-          # ---------------------------------------------------------
-          # SALVAR
-          # ---------------------------------------------------------
-
-          with open(
-              r"C:\RustDesk\id.txt",
-              "w",
-              encoding="utf-8"
-          ) as f:
-
-              f.write(
-                  rustdesk_id
-              )
-
-
-          print("=" * 50)
-          print("CONFIGURACAO FINALIZADA")
-          print("=" * 50)
-
-          '@ | Set-Content `
-              "C:\RustDesk\setup.py" `
-              -Encoding UTF8
-
-
-      # ============================================================
-      # 4. ABRIR RUSTDESK
-      # ============================================================
-
-      - name: Start RustDesk
-        shell: powershell
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP	ailscale.msi"
+          
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
         run: |
-          $ErrorActionPreference = "Stop"
-
-          Write-Host "========================================"
-          Write-Host " INICIANDO RUSTDESK"
-          Write-Host "========================================"
-
-          $rustdesk = "C:\RustDesk\rustdesk.exe"
-
-          if (!(Test-Path $rustdesk)) {
-              throw "RustDesk nao encontrado."
+          # Bring up Tailscale with the provided auth key and set a unique hostname
+          & "$env:ProgramFiles\Tailscale	ailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          
+          # Wait for Tailscale to assign an IP
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale	ailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
           }
-
-          Get-Process rustdesk `
-            -ErrorAction SilentlyContinue |
-            Stop-Process `
-              -Force `
-              -ErrorAction SilentlyContinue
-
-          Start-Sleep -Seconds 2
-
-          Start-Process `
-            -FilePath $rustdesk `
-            -WorkingDirectory "C:\RustDesk"
-
-          Write-Host ""
-          Write-Host "Aguardando interface..."
-
-          Start-Sleep -Seconds 10
-
-          $process = Get-Process rustdesk `
-            -ErrorAction SilentlyContinue
-
-          if (!$process) {
-              throw "RustDesk nao iniciou."
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
           }
-
-          Write-Host ""
-          Write-Host "RustDesk ativo:"
-          Write-Host ""
-
-          $process |
-            Select-Object `
-              Id,
-              ProcessName,
-              SessionId |
-            Format-Table -AutoSize
-
-
-      # ============================================================
-      # 5. CONFIGURAR VIA GUI
-      # ============================================================
-
-      - name: Configure RustDesk
-        shell: powershell
-        env:
-          RUSTDESK_PASSWORD: ${{ secrets.RUSTDESK_PASSWORD }}
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+      
+      - name: Verify RDP Accessibility
         run: |
-          $ErrorActionPreference = "Stop"
-
-          Write-Host "========================================"
-          Write-Host " CONFIGURANDO RUSTDESK"
-          Write-Host "========================================"
-
-          if ([string]::IsNullOrWhiteSpace(
-              $env:RUSTDESK_PASSWORD
-          )) {
-
-              throw "Secret RUSTDESK_PASSWORD nao configurado."
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          
+          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
           }
+          Write-Host "TCP connectivity successful!"
 
-          python C:\RustDesk\setup.py
-
-
-      # ============================================================
-      # 6. LER E CORRIGIR ID
-      # ============================================================
-
-      - name: Read RustDesk ID
-        shell: powershell
+      - name: Maintain Connection
         run: |
-          $ErrorActionPreference = "Stop"
-
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host " VERIFICANDO ID"
-          Write-Host "========================================"
-
-          $file = "C:\RustDesk\id.txt"
-
-          if (!(Test-Path $file)) {
-              throw "Arquivo com ID nao foi criado."
-          }
-
-          $rawId = (
-              Get-Content `
-                $file `
-                -Raw
-          ).Trim()
-
-          Write-Host ""
-          Write-Host "ID copiado da interface:"
-          Write-Host ""
-          Write-Host "       $rawId"
-          Write-Host ""
-
-
-          # ========================================================
-          # CORRECAO:
-          #
-          # 223 099 321
-          #
-          # vira:
-          #
-          # 223099321
-          # ========================================================
-
-          $id = $rawId -replace '[^0-9]', ''
-
-
-          if (
-              [string]::IsNullOrWhiteSpace($id)
-          ) {
-
-              throw "Nenhum numero encontrado no ID."
-
-          }
-
-
-          if ($id.Length -lt 6) {
-
-              throw "ID muito curto: $id"
-
-          }
-
-
-          Write-Host "ID normalizado:"
-          Write-Host ""
-          Write-Host "       $id"
-          Write-Host ""
-
-
-          # Disponibiliza para os proximos steps.
-
-          "RUSTDESK_ID=$id" >> $env:GITHUB_ENV
-
-          "RUSTDESK_ID_FORMATTED=$rawId" >> $env:GITHUB_ENV
-
-
-          Write-Host "========================================"
-          Write-Host "       RUSTDESK PRONTO"
-          Write-Host "========================================"
-          Write-Host ""
-          Write-Host "ID mostrado pelo RustDesk:"
-          Write-Host ""
-          Write-Host "       $rawId"
-          Write-Host ""
-          Write-Host "ID sem espacos:"
-          Write-Host ""
-          Write-Host "       $id"
-          Write-Host ""
-          Write-Host "========================================"
-
-
-      # ============================================================
-      # 7. VERIFICAR INSTALACAO
-      # ============================================================
-
-      - name: Check RustDesk
-        shell: powershell
-        run: |
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host " DIAGNOSTICO RUSTDESK"
-          Write-Host "========================================"
-
-          Write-Host ""
-          Write-Host "Processos:"
-          Write-Host ""
-
-          Get-Process rustdesk `
-            -ErrorAction SilentlyContinue |
-            Select-Object `
-              Id,
-              ProcessName,
-              SessionId,
-              StartTime |
-            Format-Table -AutoSize
-
-
-          Write-Host ""
-          Write-Host "Servicos:"
-          Write-Host ""
-
-          Get-Service |
-            Where-Object {
-
-              $_.Name -like "*rustdesk*" -or
-              $_.DisplayName -like "*rustdesk*"
-
-            } |
-            Format-Table `
-              Name,
-              DisplayName,
-              Status,
-              StartType `
-              -AutoSize
-
-
-          Write-Host ""
-          Write-Host "Executavel instalado:"
-          Write-Host ""
-
-          if (
-              Test-Path `
-                "C:\Program Files\RustDesk\rustdesk.exe"
-          ) {
-
-              Write-Host "SIM"
-              Write-Host ""
-              Write-Host "C:\Program Files\RustDesk\rustdesk.exe"
-
-          }
-          else {
-
-              Write-Host "NAO"
-
-          }
-
-
-      # ============================================================
-      # 8. MOSTRAR DADOS
-      # ============================================================
-
-      - name: Mobile Connection
-        shell: powershell
-        run: |
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host "       RUSTDESK MOBILE"
-          Write-Host "========================================"
-          Write-Host ""
-          Write-Host "ID mostrado na interface:"
-          Write-Host ""
-          Write-Host "       $env:RUSTDESK_ID_FORMATTED"
-          Write-Host ""
-          Write-Host "ID sem espacos:"
-          Write-Host ""
-          Write-Host "       $env:RUSTDESK_ID"
-          Write-Host ""
-          Write-Host "Senha:"
-          Write-Host ""
-          Write-Host "Use a senha definida no Secret"
-          Write-Host "RUSTDESK_PASSWORD"
-          Write-Host ""
-          Write-Host "No Android/iPhone:"
-          Write-Host ""
-          Write-Host "1. Abra RustDesk"
-          Write-Host "2. Digite o ID"
-          Write-Host "3. Conecte"
-          Write-Host "4. Digite sua senha"
-          Write-Host ""
-          Write-Host "========================================"
-
-
-      # ============================================================
-      # 9. KEEP ALIVE
-      # ============================================================
-
-      - name: Keep Alive
-        shell: powershell
-        run: |
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host " WINDOWS ONLINE"
-          Write-Host "========================================"
-          Write-Host ""
-          Write-Host "RustDesk:"
-          Write-Host "$env:RUSTDESK_ID_FORMATTED"
-          Write-Host ""
-
-          $start = Get-Date
-
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $(echo $env:RDP_CREDS)"
+          Write-Host "==================`n"
+          
+          # Keep runner active indefinitely (or until manually cancelled)
           while ($true) {
-
-              $process = Get-Process rustdesk `
-                  -ErrorAction SilentlyContinue
-
-
-              if (!$process) {
-
-                  Write-Host ""
-                  Write-Host "RustDesk parou."
-                  Write-Host "Tentando reiniciar..."
-
-
-                  $installed = `
-                    "C:\Program Files\RustDesk\rustdesk.exe"
-
-
-                  if (Test-Path $installed) {
-
-                      Start-Process `
-                        -FilePath $installed
-
-                  }
-                  else {
-
-                      Start-Process `
-                        -FilePath "C:\RustDesk\rustdesk.exe"
-
-                  }
-
-
-                  Start-Sleep -Seconds 10
-              }
-
-
-              $elapsed = (
-                  Get-Date
-              ) - $start
-
-
-              Write-Host (
-                  "RustDesk ONLINE | ID: {0} | Tempo: {1:hh\:mm\:ss}" -f `
-                  $env:RUSTDESK_ID_FORMATTED,
-                  $elapsed
-              )
-
-
-              Start-Sleep -Seconds 60
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
           }
