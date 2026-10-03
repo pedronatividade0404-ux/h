@@ -1,22 +1,170 @@
-name: Windows - RustDesk
+name: Windows - RustDesk Mobile
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: Start Building...
+  rustdesk:
+    name: Windows RustDesk
     runs-on: windows-latest
-    timeout-minutes: 9999
-    
+    timeout-minutes: 360
+
     steps:
-      - name: Downloading & Installing Essentials
+      - name: Install RustDesk
+        shell: powershell
         run: |
-          Invoke-WebRequest -Uri "https://www.dropbox.com/scl/fi/qdyd4p9t6xoabl95n5o3g/Downloads.bat?rlkey=snr74vv1vr8k5suujugvrhjtm&dl=1" -OutFile "Downloads.bat"
-          cmd /c Downloads.bat
+          $ErrorActionPreference = "Stop"
 
-      - name: Log In To AnyDesk
-        run: cmd /c show.bat
+          Write-Host "========================================"
+          Write-Host " Instalando RustDesk..."
+          Write-Host "========================================"
 
-      - name: Time Counter
-        run: python time.py
+          $url = "https://github.com/rustdesk/rustdesk/releases/latest/download/rustdesk-1.4.4-x86_64.exe"
+          $installer = "$env:TEMP\rustdesk.exe"
+
+          Invoke-WebRequest `
+            -Uri $url `
+            -OutFile $installer
+
+          Write-Host "Download concluido."
+
+          # Instala o RustDesk
+          Start-Process `
+            -FilePath $installer `
+            -ArgumentList "--silent-install" `
+            -Wait
+
+          Start-Sleep -Seconds 10
+
+          $rustdesk = "C:\Program Files\RustDesk\rustdesk.exe"
+
+          if (!(Test-Path $rustdesk)) {
+              throw "RustDesk nao foi encontrado."
+          }
+
+          Write-Host "RustDesk instalado em:"
+          Write-Host $rustdesk
+
+      - name: Configure RustDesk
+        shell: powershell
+        env:
+          RUSTDESK_PASSWORD: ${{ secrets.RUSTDESK_PASSWORD }}
+        run: |
+          $rustdesk = "C:\Program Files\RustDesk\rustdesk.exe"
+
+          Write-Host "========================================"
+          Write-Host " Configurando RustDesk"
+          Write-Host "========================================"
+
+          # Inicia serviço
+          Start-Process `
+            -FilePath $rustdesk `
+            -ArgumentList "--install-service" `
+            -Wait `
+            -ErrorAction SilentlyContinue
+
+          Start-Sleep -Seconds 5
+
+          # Inicia RustDesk
+          Start-Process $rustdesk
+
+          Start-Sleep -Seconds 15
+
+          # Configura senha permanente
+          if ($env:RUSTDESK_PASSWORD) {
+
+              Write-Host "Configurando senha..."
+
+              & $rustdesk `
+                --password $env:RUSTDESK_PASSWORD
+
+          } else {
+
+              Write-Host ""
+              Write-Host "AVISO:"
+              Write-Host "Secret RUSTDESK_PASSWORD nao configurado."
+              Write-Host ""
+
+          }
+
+      - name: Get RustDesk ID
+        shell: powershell
+        run: |
+          $rustdesk = "C:\Program Files\RustDesk\rustdesk.exe"
+
+          Write-Host ""
+          Write-Host "Aguardando ID do RustDesk..."
+
+          $id = ""
+
+          for ($i = 0; $i -lt 12; $i++) {
+
+              try {
+                  $id = (& $rustdesk --get-id).Trim()
+              }
+              catch {
+                  $id = ""
+              }
+
+              if ($id) {
+                  break
+              }
+
+              Start-Sleep -Seconds 5
+          }
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "          RUSTDESK PRONTO"
+          Write-Host "=========================================="
+          Write-Host ""
+          Write-Host "ID:"
+          Write-Host ""
+          Write-Host "        $id"
+          Write-Host ""
+          Write-Host "Senha: configurada pelo GitHub Secret"
+          Write-Host ""
+          Write-Host "Abra o RustDesk no celular"
+          Write-Host "e conecte usando o ID acima."
+          Write-Host ""
+          Write-Host "=========================================="
+
+          "RUSTDESK_ID=$id" >> $env:GITHUB_ENV
+
+      - name: Show Connection Information
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host " CONEXAO MOBILE"
+          Write-Host "========================================"
+          Write-Host ""
+          Write-Host "RustDesk ID:"
+          Write-Host "$env:RUSTDESK_ID"
+          Write-Host ""
+          Write-Host "Use a senha configurada no Secret:"
+          Write-Host "RUSTDESK_PASSWORD"
+          Write-Host ""
+          Write-Host "Android/iPhone -> RustDesk"
+          Write-Host "Digite o ID acima."
+          Write-Host ""
+          Write-Host "========================================"
+
+      - name: Keep Windows Alive
+        shell: powershell
+        run: |
+          Write-Host "Runner ativo."
+          Write-Host "Tempo maximo do GitHub-hosted runner: 6 horas."
+          Write-Host ""
+
+          $start = Get-Date
+
+          while ($true) {
+
+              $elapsed = (Get-Date) - $start
+
+              Write-Host ("RustDesk ativo | ID: {0} | Tempo: {1:hh\:mm\:ss}" -f `
+                  $env:RUSTDESK_ID, $elapsed)
+
+              Start-Sleep -Seconds 60
+          }
