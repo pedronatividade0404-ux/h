@@ -55,8 +55,6 @@ jobs:
       # ============================================================
       - name: Create RDP User
         shell: powershell
-        env:
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
 
@@ -64,39 +62,108 @@ jobs:
           Write-Host " CRIANDO USUARIO RDP"
           Write-Host "========================================"
 
-          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
-              throw "Crie o secret RDP_PASSWORD antes de executar."
+          # Gera senha forte compatível com a política do Windows
+          $upper   = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+          $lower   = "abcdefghijkmnopqrstuvwxyz"
+          $numbers = "23456789"
+          $special = "!@#$%*-_"
+
+          $chars = @()
+
+          # Garante complexidade mínima
+          $chars += $upper[(Get-Random -Maximum $upper.Length)]
+          $chars += $upper[(Get-Random -Maximum $upper.Length)]
+
+          $chars += $lower[(Get-Random -Maximum $lower.Length)]
+          $chars += $lower[(Get-Random -Maximum $lower.Length)]
+
+          $chars += $numbers[(Get-Random -Maximum $numbers.Length)]
+          $chars += $numbers[(Get-Random -Maximum $numbers.Length)]
+
+          $chars += $special[(Get-Random -Maximum $special.Length)]
+          $chars += $special[(Get-Random -Maximum $special.Length)]
+
+          # Completa até 18 caracteres
+          $all = $upper + $lower + $numbers + $special
+
+          while ($chars.Count -lt 18) {
+              $chars += $all[(Get-Random -Maximum $all.Length)]
           }
+
+          # Embaralha
+          $password = -join (
+              $chars |
+              Sort-Object {
+                  Get-Random
+              }
+          )
 
           $securePassword = ConvertTo-SecureString `
-            $env:RDP_PASSWORD `
-            -AsPlainText `
-            -Force
+              $password `
+              -AsPlainText `
+              -Force
 
-          $existingUser = Get-LocalUser `
-            -Name "RDP" `
-            -ErrorAction SilentlyContinue
+          # Remove usuário anterior, caso exista
+          $existing = Get-LocalUser `
+              -Name "RDP" `
+              -ErrorAction SilentlyContinue
 
-          if (!$existingUser) {
-              New-LocalUser `
-                -Name "RDP" `
-                -Password $securePassword `
-                -AccountNeverExpires `
-                -PasswordNeverExpires
+          if ($existing) {
+
+              Write-Host "Usuario RDP existente encontrado."
+
+              Set-LocalUser `
+                  -Name "RDP" `
+                  -Password $securePassword
+
           }
           else {
-              Set-LocalUser `
-                -Name "RDP" `
-                -Password $securePassword
+
+              New-LocalUser `
+                  -Name "RDP" `
+                  -Password $securePassword `
+                  -AccountNeverExpires `
+                  -PasswordNeverExpires `
+                  -Description "GitHub Actions RDP User"
           }
 
           Add-LocalGroupMember `
-            -Group "Remote Desktop Users" `
-            -Member "RDP" `
-            -ErrorAction SilentlyContinue
+              -Group "Remote Desktop Users" `
+              -Member "RDP" `
+              -ErrorAction SilentlyContinue
+
+          # Administrador, se você realmente precisa de acesso admin
+          Add-LocalGroupMember `
+              -Group "Administrators" `
+              -Member "RDP" `
+              -ErrorAction SilentlyContinue
+
+          # Verifica criação
+          $user = Get-LocalUser `
+              -Name "RDP" `
+              -ErrorAction SilentlyContinue
+
+          if (!$user) {
+              throw "Falha ao criar usuario RDP."
+          }
+
+          # Guarda para os próximos steps
+          "RDP_USERNAME=RDP" >> $env:GITHUB_ENV
+          "RDP_GENERATED_PASSWORD=$password" >> $env:GITHUB_ENV
 
           Write-Host ""
-          Write-Host "Usuario RDP criado."
+          Write-Host "========================================"
+          Write-Host " USUARIO CRIADO"
+          Write-Host "========================================"
+          Write-Host ""
+          Write-Host "Usuario:"
+          Write-Host "RDP"
+          Write-Host ""
+          Write-Host "Senha:"
+          Write-Host $password
+          Write-Host ""
+          Write-Host "GUARDE ESSA SENHA."
+          Write-Host "========================================"
 
 
       # ============================================================
